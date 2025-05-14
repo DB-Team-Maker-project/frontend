@@ -1,170 +1,171 @@
 // src/pages/MatchingPage.js
-import React, { useState, useContext, useEffect } from 'react';
+import React, { useState, useContext, useEffect, useCallback } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import { AuthContext, DataContext } from '../App';
 import MemberInfoPopup from '../components/Team/MemberInfoPopup';
+import * as api from '../services/api';
 
 const MatchingPage = () => {
-  const { projectId } = useParams();
-  const { currentUser, logout } = useContext(AuthContext);
-  const { projects, teams, users, supports, participants, setTeams, setSupports } = useContext(DataContext);
-  const navigate = useNavigate();
+  const { projectId: projectIdStr } = useParams(); // URL 파라미터는 문자열
+  const projectId = parseInt(projectIdStr); // API 호출 시 숫자로 변환
+  const { currentUser, logout, isLoading: authIsLoading, setIsLoading: setAuthIsLoading } = useContext(AuthContext);
+  const { projects } = useContext(DataContext); // 전체 프로젝트 목록 (현재 프로젝트 정보 가져오기 위함)
 
   const [project, setProject] = useState(null);
   const [availableTeams, setAvailableTeams] = useState([]); // 미완성 팀들
-  const [selectedUserForPopup, setSelectedUserForPopup] = useState(null);
+  const [myTeamApplications, setMyTeamApplications] = useState([]); // 내가 이 프로젝트의 팀들에 지원한 내역
+  const [selectedUserIdForPopup, setSelectedUserIdForPopup] = useState(null);
+  const [pageIsLoading, setPageIsLoading] = useState(false);
 
-  useEffect(() => {
-    const currentProject = projects.find(p => p.id === projectId);
-    if (currentProject) {
-      setProject(currentProject);
-      const filteredTeams = teams.filter(t => t.projectId === projectId && !t.isComplete);
-      setAvailableTeams(filteredTeams);
-    } else {
-      alert("프로젝트 정보를 찾을 수 없습니다.");
+  const loadProjectDetails = useCallback(() => {
+    const currentProj = projects.find(p => p.id === projectIdStr);
+    if (currentProj) {
+      setProject(currentProj);
+    } else if (projects.length > 0) { // projects 로드는 되었으나 해당 ID가 없을 때
+      alert("대회 정보를 찾을 수 없습니다.");
       navigate('/main');
     }
-  }, [projectId, projects, teams]);
+  }, [projects, projectIdStr, navigate]);
 
-  const handleLogout = () => { logout(); navigate('/login'); };
+  const loadTeamsAndMyApplications = useCallback(async () => {
+    if (!currentUser || !currentUser.id || !project) return;
+    setPageIsLoading(true);
+    try {
+      const teamsData = await api.fetchProjectTeams(projectId); // API는 숫자 pid
+      setAvailableTeams(teamsData.filter(team => !team.is_complete)); // FastAPI는 is_complete
 
-  const handleTeamApply = (teamId) => {
-    if (!project || !currentUser) return;
-
-    const teamToApply = teams.find(t => t.id === teamId);
-    if (!teamToApply) {
-        alert("팀 정보를 찾을 수 없습니다.");
-        return;
+      const myAppsData = await api.fetchMySentApplications(currentUser.id);
+      setMyTeamApplications(myAppsData.filter(app => app.project_id === projectId)); // 현재 프로젝트 관련 지원만
+    } catch (error) {
+      console.error("팀 또는 내 지원 정보 로드 실패:", error);
+      // alert("정보를 불러오는 데 실패했습니다: " + error.message);
+    } finally {
+      setPageIsLoading(false);
     }
+  }, [currentUser, project, projectId]);
 
-    const currentTeamSize = (teamToApply.leaderId ? 1 : 0) + teamToApply.members.length;
-    if (currentTeamSize >= project.maxTeamSize) {
-      alert("팀 인원이 이미 최대입니다. 이 팀에는 신청할 수 없습니다.");
-      return;
+  useEffect(() => {
+    loadProjectDetails();
+  }, [loadProjectDetails]);
+
+  useEffect(() => {
+    if (project) { // 프로젝트 정보가 로드된 후 팀 정보 로드
+        loadTeamsAndMyApplications();
     }
+  }, [project, loadTeamsAndMyApplications]);
 
-    const alreadyApplied = supports.some(s => s.userId === currentUser.id && s.teamId === teamId && s.projectId === projectId);
-    if (alreadyApplied) {
-      alert("이미 해당 팀에 지원한 상태입니다.");
-      return;
+
+  const handleTeamApply = async (teamId) => {
+    if (!currentUser || !currentUser.id || !project) return;
+    setAuthIsLoading(true);
+    try {
+      await api.applyToJoinTeam(currentUser.id, parseInt(teamId));
+      alert("팀에 성공적으로 지원했습니다.");
+      await loadTeamsAndMyApplications(); // 지원 후 내역 새로고침
+    } catch (error) {
+      alert(error.message);
+    } finally {
+      setAuthIsLoading(false);
     }
-
-    setSupports(prevSupports => [...prevSupports, { id: `sup${Date.now()}`, userId: currentUser.id, teamId, projectId }]);
-    alert("팀에 성공적으로 지원했습니다.");
   };
 
-  const handleCreateTeam = () => {
-    if (!project || !currentUser) return;
-
-    // 팀 개설 조건: (프로젝트A 참가 인원수 / 프로젝트A 최소 인원수) < 프로젝트A 팀장 수 (즉, 팀 수가 부족할 때만 개설 가능)
-    // 요청: "(참가인원수/최소인원수) 가 팀장수와 같거나 클 때 개설 불가"
-    const projectParticipantsCount = participants.filter(p => p.projectId === projectId).length;
-    const projectTeamsForThisProject = teams.filter(t => t.projectId === projectId);
-    const projectLeaderCount = projectTeamsForThisProject.length; // 현재 이 프로젝트의 팀 수 (각 팀에 리더 1명)
-
-    // 최소 팀 인원수가 0보다 커야 나눗셈 가능
-    if (project.minTeamSize > 0) {
-        if (projectParticipantsCount / project.minTeamSize >= projectLeaderCount && projectLeaderCount > 0) {
-            // 이 조건은 팀 수가 충분하거나 너무 많을 때 팀 개설을 막기 위함으로 해석
-            alert("현재 조건에서는 더 이상 팀을 개설할 수 없습니다. (참가 인원 대비 팀 수 제한)");
-            return;
-        }
-    } else if (projectLeaderCount > 0 && projectParticipantsCount < 1) { // 최소 팀원수가 0 또는 미설정이고, 참가자가 없는데 팀이 이미 있다면
-        alert("팀 개설을 위한 최소 요건을 확인해주세요.");
-        return;
+  const handleCreateTeam = async () => {
+    if (!currentUser || !currentUser.id || !project) return;
+    setAuthIsLoading(true);
+    try {
+      const response = await api.createTeamForProject(currentUser.id, projectId); // API는 숫자 pid
+      alert(response.message || "새로운 팀이 개설되었습니다.");
+      navigate(`/team/${projectId}/${response.team_id}`); // FastAPI 응답은 team_id
+    } catch (error) {
+      alert(error.message);
+    } finally {
+      setAuthIsLoading(false);
     }
-
-
-    // 현재 유저가 이미 이 프로젝트의 다른 팀 리더이거나 멤버인지 확인
-    const existingTeamAffiliation = teams.find(t => t.projectId === projectId && (t.leaderId === currentUser.id || t.members.includes(currentUser.id)));
-    if (existingTeamAffiliation) {
-        alert("이미 이 프로젝트의 다른 팀에 소속되어 있거나 팀장입니다. 새로운 팀을 개설할 수 없습니다.");
-        return;
-    }
-
-
-    const newTeam = {
-      id: `team${Date.now()}`,
-      projectId: projectId,
-      leaderId: currentUser.id,
-      members: [], // 초기 멤버는 없음
-      isComplete: false
-    };
-    setTeams(prevTeams => [...prevTeams, newTeam]);
-    alert("새로운 팀이 개설되었습니다. 팀 정보 확인 화면으로 이동합니다.");
-    navigate(`/team/${projectId}/${newTeam.id}`);
   };
 
-  const commonNavbarStyle = { /* ... MainPage와 동일 ... */ };
-  const navButtonStyle = { /* ... MainPage와 동일 ... */ };
+  const navBarStyle = {display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '10px 20px', background: '#f8f9fa', borderBottom: '1px solid #dee2e6', marginBottom: '20px'};
+  const navButtonStyle = {marginLeft: '10px', padding: '8px 15px', background: '#6c757d', color: 'white', border: 'none', borderRadius: '4px', cursor: 'pointer'};
 
+  if (authIsLoading || (pageIsLoading && !project)) {
+      return <div className="global-loader">정보를 불러오는 중...</div>;
+  }
+  if (!project) {
+      return <div style={{padding: '20px', textAlign: 'center'}}>대회 정보를 찾을 수 없습니다. <button onClick={() => navigate('/main')}>메인으로</button></div>;
+  }
 
-  if (!project || !currentUser) return <p>로딩 중...</p>;
 
   return (
     <div style={{ padding: '0 20px 20px 20px' }}>
-      {/* Navbar */}
-      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '10px 20px', background: '#f8f9fa', borderBottom: '1px solid #dee2e6', marginBottom: '20px' }}>
-        <h1 style={{ fontSize: '1.8em', margin: 0 }}>{project.name} - 팀 매칭</h1>
+      <div style={navBarStyle}>
+        <h2 style={{ fontSize: '1.5em', margin: 0 }}>{project.name} - 팀 매칭</h2>
         <div>
           {/* <button onClick={() => navigate('/notifications')} style={navButtonStyle}>알림</button> */}
-          <button onClick={handleLogout} style={{ marginLeft: '10px', padding: '8px 15px', background: '#dc3545', color: 'white', border: 'none', borderRadius: '4px', cursor: 'pointer'}}>로그아웃</button>
+          <button onClick={() => { logout(); navigate('/login');}} style={{...navButtonStyle, background: '#dc3545'}} disabled={authIsLoading}>로그아웃</button>
         </div>
       </div>
 
+      <h3 style={{marginBottom: '20px'}}>참여 가능한 팀 목록</h3>
+      {pageIsLoading && availableTeams.length === 0 && <p>팀 목록을 불러오는 중...</p>}
+      {!pageIsLoading && availableTeams.length === 0 && <p>현재 참여 가능한 팀이 없습니다. 새로운 팀을 개설해보세요!</p>}
 
-      <h3 style={{marginBottom: '20px'}}>참여 가능한 팀 목록 (미완성 팀)</h3>
-      {availableTeams.length === 0 ? (
-        <p>현재 참여 가능한 팀이 없습니다. 새로운 팀을 개설해보세요!</p>
-      ) : (
-        availableTeams.map(team => {
-          const leader = users.find(u => u.id === team.leaderId);
-          const memberDetails = team.members.map(memberId => users.find(u => u.id === memberId)).filter(Boolean);
-          const isAlreadyApplied = supports.some(s => s.userId === currentUser.id && s.teamId === team.id && s.projectId === projectId);
-          const currentTeamSize = (leader ? 1 : 0) + memberDetails.length;
+      {availableTeams.map(team => {
+        const leaderInfo = team.leader_info; // FastAPI 응답에서 leader_info 객체 사용
+        const memberCount = team.members ? team.members.length : 0; // 팀장도 멤버에 포함되어 count될 수 있으므로 API 응답 구조 확인 필요
+                                                                     // 현재 FastAPI list_teams 응답은 leader_info와 members 배열을 별도로 줌.
+                                                                     // 팀장은 members 배열에 포함시키거나, (1 + members.length)로 계산.
+                                                                     // FastAPI의 Member 테이블은 팀장도 포함하므로, team.members.length가 총 인원일 수 있음.
+                                                                     // 여기서는 API가 반환하는 members 배열의 길이를 사용.
+        const isAppliedByMe = myTeamApplications.some(app => String(app.team_id) === team.id && app.status === 0); // 대기중인 지원
+        const isAcceptedByMe = myTeamApplications.some(app => String(app.team_id) === team.id && app.status === 1); // 수락된 지원
 
-          return (
-            <div key={team.id} style={{ border: '1px solid #ddd', padding: '15px', marginBottom: '15px', borderRadius: '5px' }}>
-              <h4>팀 ID: {team.id} (현재 {currentTeamSize}/{project.maxTeamSize}명)</h4>
-              {leader && (
-                <p><strong>팀장:</strong> <span onClick={() => setSelectedUserForPopup(leader)} style={{ cursor: 'pointer', color: 'blue', textDecoration: 'underline' }}>{leader.name}</span></p>
-              )}
-              <p><strong>팀원:</strong></p>
-              {memberDetails.length > 0 ? (
-                <ul style={{ paddingLeft: '20px', margin: 0 }}>
-                  {memberDetails.map(member => (
-                    <li key={member.id}>
-                      <span onClick={() => setSelectedUserForPopup(member)} style={{ cursor: 'pointer', color: 'blue', textDecoration: 'underline' }}>{member.name}</span>
-                    </li>
-                  ))}
-                </ul>
-              ) : <p style={{ marginLeft: '20px' }}>아직 팀원이 없습니다.</p>}
+        let applyButton;
+        if (isAcceptedByMe) {
+            applyButton = <span style={{ color: 'blue', fontWeight: 'bold' }}>이 팀에 소속됨</span>;
+        } else if (isAppliedByMe) {
+            applyButton = <span style={{ color: 'green', fontWeight: 'bold' }}>신청 완료 (대기중)</span>;
+        } else {
+            applyButton = (
+                <button onClick={() => handleTeamApply(team.id)}
+                        disabled={authIsLoading || pageIsLoading || memberCount >= project.maxTeamSize}
+                        style={{padding: '8px 12px', background: '#28a745', color: 'white' }}>
+                    {memberCount >= project.maxTeamSize ? "인원 마감" : "이 팀에 지원"}
+                </button>
+            );
+        }
 
-              <div style={{ marginTop: '10px' }}>
-                {isAlreadyApplied ? (
-                  <span style={{ color: 'green', fontWeight: 'bold' }}>신청됨</span>
-                ) : (
-                  <button onClick={() => handleTeamApply(team.id)} disabled={currentTeamSize >= project.maxTeamSize} style={{padding: '8px 12px', background: '#28a745', color: 'white', border: 'none', borderRadius: '4px', cursor: currentTeamSize >= project.maxTeamSize ? 'not-allowed' : 'pointer' }}>
-                    {currentTeamSize >= project.maxTeamSize ? "인원 마감" : "이 팀에 신청"}
-                  </button>
-                )}
-              </div>
-            </div>
-          );
-        })
-      )}
+
+        return (
+          <div key={team.id} style={{ border: '1px solid #ddd', padding: '15px', marginBottom: '15px', borderRadius: '5px', background: 'white' }}>
+            <h4>팀 ID: {team.id} (현재 {memberCount}명 / 최대 {project.maxTeamSize}명)</h4>
+            {leaderInfo && (
+              <p><strong>팀장:</strong> <span onClick={() => setSelectedUserIdForPopup(leaderInfo.id)} style={{ cursor: 'pointer', color: 'blue', textDecoration: 'underline' }}>{leaderInfo.name}</span></p>
+            )}
+            <p><strong>팀원:</strong></p>
+            {team.members && team.members.length > 0 ? (
+              <ul style={{ paddingLeft: '20px', margin: '0 0 10px 0' }}>
+                {team.members.map(member => (
+                  member.id !== team.leader_id && // 팀장은 위에서 표시했으므로 제외 (선택적)
+                  <li key={member.id}>
+                    <span onClick={() => setSelectedUserIdForPopup(member.id)} style={{ cursor: 'pointer', color: 'blue', textDecoration: 'underline' }}>{member.name}</span>
+                  </li>
+                ))}
+              </ul>
+            ) : <p style={{ marginLeft: '20px' }}>아직 팀원이 없습니다. (팀장 제외)</p>}
+            {applyButton}
+          </div>
+        );
+      })}
 
       <div style={{ position: 'fixed', bottom: '30px', right: '30px' }}>
-        <button onClick={handleCreateTeam} style={{ padding: '12px 20px', backgroundColor: 'darkseagreen', color: 'white', border: 'none', borderRadius: '50px', fontSize: '1em', boxShadow: '0 2px 6px rgba(0,0,0,0.2)', cursor: 'pointer' }}>
+        <button onClick={handleCreateTeam} style={{ padding: '12px 20px', backgroundColor: '#5cb85c', color: 'white', border: 'none', borderRadius: '50px', fontSize: '1em', boxShadow: '0 2px 6px rgba(0,0,0,0.2)' }} disabled={authIsLoading || pageIsLoading}>
           + 새로운 팀 개설
         </button>
       </div>
 
-      {selectedUserForPopup && (
-        <MemberInfoPopup user={selectedUserForPopup} onClose={() => setSelectedUserForPopup(null)} />
+      {selectedUserIdForPopup && (
+        <MemberInfoPopup userId={selectedUserIdForPopup} onClose={() => setSelectedUserIdForPopup(null)} />
       )}
     </div>
   );
 };
-
 export default MatchingPage;
